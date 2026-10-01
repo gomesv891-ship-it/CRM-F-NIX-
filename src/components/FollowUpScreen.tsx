@@ -66,6 +66,7 @@ import {
   getSupabaseClient,
   executeWithRetry,
   safeMergeLists,
+  setMemoryCollection,
 } from '../utils/supabaseClient';
 import {
   getWhatsAppMessageTemplate,
@@ -392,10 +393,10 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
   // Clients database for accurate clientType lookup
   const [clients, setClients] = useState<ClientRecord[]>([]);
 
-  // Requirement 6: Visualização por Dia e Mês
+  // Requirement 6: Visualização por Dia e Mês (default: 'todos' para exibir todos os orçamentos históricos)
   const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const currentMonthStr = useMemo(() => new Date().toISOString().slice(0, 7), []);
-  const [periodMode, setPeriodMode] = useState<'dia' | 'mes' | 'todos'>('mes');
+  const [periodMode, setPeriodMode] = useState<'dia' | 'mes' | 'todos'>('todos');
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
   const [selectedMonth, setSelectedMonth] = useState<string>(currentMonthStr);
 
@@ -706,9 +707,33 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
       // 4. Auto-sync orçamentos emitidos que ainda não estão na esteira de Follow-up
       let updated = false;
       mergedOrcs.forEach((orc) => {
-        const exists = currentItems.some(
-          (it) => it.orcamentoId === orc.id || it.id === `fup_${orc.id}` || it.id === orc.id
-        );
+        if (!orc || !orc.id) return;
+        const targetId = String(orc.id).trim();
+        const targetNum = targetId.replace(/^orc_/, '').replace(/^fup_/, '');
+
+        // Verifica vínculo pré-existente com máxima precisão para NÃO duplicar
+        const existingItem = currentItems.find((it) => {
+          if (!it) return false;
+          const itId = String(it.id || '').trim();
+          const itOrcId = String(it.orcamentoId || '').trim();
+
+          if (itOrcId === targetId || itId === targetId || itId === `fup_${targetId}`) {
+            return true;
+          }
+
+          const cleanItId = itId.replace(/^fup_/, '').replace(/^orc_/, '');
+          const cleanItOrcId = itOrcId.replace(/^fup_/, '').replace(/^orc_/, '');
+
+          if (targetNum && targetNum.length >= 6) {
+            if (cleanItOrcId === targetNum || cleanItId === targetNum) {
+              return true;
+            }
+          }
+
+          return false;
+        });
+
+        const exists = Boolean(existingItem);
         const creationDate =
           orc.dataOrcamento || orc.dataCriacao || orc.createdAt || orc.savedAt || orc.data || new Date().toISOString();
         const isSold = isSoldStatus(orc.status);
@@ -729,7 +754,7 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
           getUserIdByName(sellerName) ||
           getSellerIdForUser(sellerName);
 
-        const clientNameFound = orc.clientName || orc.cliente || '';
+        const clientNameFound = orc.clientName || orc.cliente || orc.clienteNome || '';
         const resolvedClientId =
           orc.clientId ||
           (clients.find((c) => c.name && clientNameFound && c.name.trim().toLowerCase() === clientNameFound.trim().toLowerCase())?.id) ||
@@ -795,24 +820,16 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
 
           currentItems = [newItem, ...currentItems];
           updated = true;
-        } else {
-          // Se já existe, mas o orçamento foi vendido no histórico e o item ainda não estava como Vendido
-          if (isSold) {
-            currentItems = currentItems.map((it) => {
-              if (
-                (it.orcamentoId === orc.id || it.id === `fup_${orc.id}` || it.id === orc.id) &&
-                !isSoldStatus(it.status)
-              ) {
-                updated = true;
-                return {
-                  ...it,
-                  status: 'Vendido',
-                  valor: parseMonetaryValue(it.valor) || parseMonetaryValue(orc.totalFinal) || parseMonetaryValue(orc.valor) || 0,
-                  dataAtualizacao: new Date().toISOString(),
-                };
-              }
-              return it;
-            });
+        } else if (existingItem) {
+          // Se já existir vínculo, NÃO duplicar. Sincroniza se houve fechamento
+          if (isSold && !isSoldStatus(existingItem.status)) {
+            existingItem.status = 'Vendido';
+            existingItem.valor = parseMonetaryValue(existingItem.valor) || parseMonetaryValue(orc.totalFinal) || parseMonetaryValue(orc.valor) || 0;
+            existingItem.dataAtualizacao = new Date().toISOString();
+            updated = true;
+          } else if (!existingItem.status || existingItem.status.trim() === '') {
+            existingItem.status = 'Orçamento Enviado';
+            updated = true;
           }
         }
       });
@@ -820,6 +837,7 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
       // 5. Salva estado sincronizado
       localStorage.setItem(STORAGE_KEY, JSON.stringify(currentItems));
       localStorage.setItem(ORCAMENTOS_HISTORY_KEY, JSON.stringify(mergedOrcs));
+      setMemoryCollection(STORAGE_KEY, currentItems);
       setItems(currentItems);
 
       if (updated && client) {
@@ -828,7 +846,7 @@ export const FollowUpScreen: React.FC<FollowUpScreenProps> = ({
             key: STORAGE_KEY,
             data: currentItems,
             updated_at: new Date().toISOString(),
-            updated_by: currentUserName,
+            updated_by: currentUserName || 'Sistema Fênix',
           });
         }).catch(() => {});
       }
